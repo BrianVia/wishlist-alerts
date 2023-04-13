@@ -1,0 +1,16 @@
+org: brianvia
+app: wishlist-alerts
+service: wishlist-alerts
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.9
+
+functions:
+  wishlist-parser:
+    handler: handler.parseWishlist
+    events:
+      - httpApi:
+          path: /
+          method: get
