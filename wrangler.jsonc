@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "wishlist-alerts",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "wishlist-alerts",
+    "database_id": "REPLACE_ME",
+    "migrations_dir": "migrations"
+  }],
+  "browser": { "binding": "BROWSER" },
+  "workflows": [{
+    "name": "wishlist-check",
+    "binding": "CHECK_WORKFLOW",
+    "class_name": "CheckWorkflow"
+  }],
+  "send_email": [{ "name": "EMAIL" }],
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": {
+    "EMAIL_FROM": "alerts@example.com",
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": ""
+  },
+  "limits": { "cpu_ms": 60000 },
+  "observability": { "enabled": true }
+}

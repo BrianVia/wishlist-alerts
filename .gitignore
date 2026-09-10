@@ -1,0 +1,7 @@
+node_modules
+.dev.vars
+.wrangler
+dist
+.codex-run.log
+CODEX-LAST.md
+wrangler.local.jsonc
