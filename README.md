@@ -8,6 +8,10 @@ It runs entirely on Cloudflare: one Worker, one D1 database, Workflows for the c
 
 This is a personal tool. It is not affiliated with Amazon, and scraping Amazon pages is against their terms of use. Run it on your own account, for your own lists.
 
+## Screenshot
+<img width="1273" height="1296" alt="image" src="https://github.com/user-attachments/assets/5d108af0-5c8b-4e31-bb1e-8eb8e71bb0f0" />
+
+
 ## What you get
 
 - Import any shared Amazon US wishlist by URL. New items are picked up on later checks.
