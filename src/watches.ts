@@ -1,17 +1,41 @@
 import { canonicalizeWishlistUrl, collectWishlist, type CollectionFailure, type CollectionResult, type Snapshot, type SnapshotItem } from './collect';
 
 type Frequency = 'daily' | 'hourly';
-type AlertKind = 'pct' | 'target' | 'both' | null;
-type ItemRow = SnapshotItem & { id: string; monitored: number; baselineCents: number | null; targetCents: number | null; pctThreshold: number; alertActive: number };
-type WishlistRow = { id: string; user_id: string; source_url: string; name: string; monitored: number; frequency: Frequency; add_new_items: number; next_due_at: string | null; last_check_at: string | null; last_success_at: string | null; last_status: string | null; last_error: string | null; created_at: string; email?: string };
+type AlertKind = 'pct' | 'target' | 'both' | 'redrop' | null;
+type Priority = 'must' | 'interested' | 'someday' | null;
+type ItemStatus = 'active' | 'bought' | 'dropped' | 'snoozed';
+type ItemRow = SnapshotItem & { id: string; monitored: number; baselineCents: number | null; targetCents: number | null; pctThreshold: number; alertActive: number; lastAlertCents: number | null; priority: Priority; status: ItemStatus; editionOf: string | null };
+type WishlistRow = { id: string; user_id: string; source_url: string; name: string; monitored: number; frequency: Frequency; add_new_items: number; redrop_pct: number | null; next_due_at: string | null; last_check_at: string | null; last_success_at: string | null; last_status: string | null; last_error: string | null; created_at: string; email?: string };
 
-export function decideAlert(input: { priceCents: number | null; baselineCents: number | null; targetCents: number | null; pctThreshold: number; alertActive: boolean }): { qualifies: boolean; kind: AlertKind; nextAlertActive: boolean } {
-  const { priceCents: price, baselineCents: baseline, targetCents: target, pctThreshold, alertActive } = input;
+export function decideAlert(input: { priceCents: number | null; baselineCents: number | null; targetCents: number | null; pctThreshold: number; alertActive: boolean; lastAlertCents?: number | null; redropPct?: number | null }): { qualifies: boolean; kind: AlertKind; nextAlertActive: boolean } {
+  const { priceCents: price, baselineCents: baseline, targetCents: target, pctThreshold, alertActive, lastAlertCents = null, redropPct = null } = input;
   if (price === null || baseline === null || baseline <= 0) return { qualifies: false, kind: null, nextAlertActive: alertActive };
   const pct = price * 100 < baseline * (100 - pctThreshold);
   const targetHit = target !== null && price <= target;
   const qualifies = pct || targetHit;
+  if (qualifies && alertActive && redropPct !== null && lastAlertCents !== null && price * 100 < lastAlertCents * (100 - redropPct)) return { qualifies: true, kind: 'redrop', nextAlertActive: true };
   return { qualifies, kind: pct && targetHit ? 'both' : pct ? 'pct' : targetHit ? 'target' : null, nextAlertActive: qualifies };
+}
+
+export function priceContext(observations: { observed_at: string; price_cents: number | null }[], lastSeenAt: string) {
+  const sorted = [...observations].sort((a, b) => Date.parse(a.observed_at) - Date.parse(b.observed_at));
+  const spans = sorted.flatMap((observation, index) => {
+    if (observation.price_cents === null) return [];
+    const end = index + 1 < sorted.length ? Date.parse(sorted[index + 1].observed_at) : Date.parse(lastSeenAt);
+    return [{ price: observation.price_cents, weight: Math.max(0, end - Date.parse(observation.observed_at)) }];
+  });
+  const total = spans.reduce((sum, span) => sum + span.weight, 0);
+  const priced = sorted.filter(row => row.price_cents !== null);
+  let typicalCents: number | null = priced[0]?.price_cents ?? null;
+  if (total > 0) {
+    let elapsed = 0;
+    for (const span of spans.sort((a, b) => a.price - b.price)) {
+      elapsed += span.weight;
+      if (elapsed * 2 >= total) { typicalCents = span.price; break; }
+    }
+  }
+  const daysObserved = total / 86_400_000;
+  return { typicalCents, lowestCents: priced.length ? Math.min(...priced.map(row => row.price_cents!)) : null, daysObserved, coverage: daysObserved < 14 || priced.length < 2 ? 'thin' as const : 'ok' as const };
 }
 
 const nowIso = () => new Date().toISOString();
@@ -24,8 +48,22 @@ function storedItem(row: Record<string, unknown>): ItemRow {
     imageUrl: row.image_url as string | null, priceCents: null, currency: 'USD', availability: 'no_price',
     monitored: row.monitored as number, baselineCents: row.baseline_cents as number | null,
     targetCents: row.target_cents as number | null, pctThreshold: row.pct_threshold as number,
-    alertActive: row.alert_active as number,
+    alertActive: row.alert_active as number, lastAlertCents: row.last_alert_cents as number | null,
+    priority: row.priority as Priority, status: row.status as ItemStatus, editionOf: row.edition_of as string | null,
   };
+}
+
+async function withPriceContext(env: Env, rows: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+  if (!rows.length) return rows;
+  const observations = (await env.DB.prepare(`SELECT o.item_id,o.observed_at,o.price_cents FROM observations o
+    JOIN runs r ON r.id=o.run_id AND r.status='recorded' WHERE o.item_id IN (SELECT value FROM json_each(?)) ORDER BY o.observed_at`)
+    .bind(JSON.stringify(rows.map(row => row.id))).all<{ item_id: string; observed_at: string; price_cents: number | null }>()).results;
+  const grouped = new Map<string, typeof observations>();
+  for (const observation of observations) grouped.set(observation.item_id, [...(grouped.get(observation.item_id) ?? []), observation]);
+  return rows.map(row => {
+    const context = priceContext(grouped.get(row.id as string) ?? [], row.observed_at as string);
+    return { ...row, typical_cents: context.typicalCents, lowest_cents: context.lowestCents, days_observed: context.daysObserved, coverage: context.coverage };
+  });
 }
 
 export async function importWishlist(
@@ -48,7 +86,7 @@ export async function importWishlist(
   for (const item of snapshot.items) {
     let stored = known.get(item.entryId);
     if (!stored) {
-      stored = { ...item, id: `${id}:${item.entryId}`, monitored: 1, baselineCents: item.priceCents, targetCents: null, pctThreshold: 20, alertActive: 0 };
+      stored = { ...item, id: `${id}:${item.entryId}`, monitored: 1, baselineCents: item.priceCents, targetCents: null, pctThreshold: 20, alertActive: 0, lastAlertCents: null, priority: null, status: 'active', editionOf: null };
       statements.push(env.DB.prepare('INSERT OR IGNORE INTO items (id,wishlist_id,entry_id,asin,product_url,title,byline,image_url,baseline_cents,last_seen_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
         .bind(stored.id, id, item.entryId, item.asin, item.productUrl, item.title, item.byline, item.imageUrl, item.priceCents, now, now));
     }
@@ -62,10 +100,22 @@ export async function importWishlist(
 }
 
 export async function listDeals(env: Env, userId: string) {
-  return (await env.DB.prepare(`SELECT i.id, i.title, i.product_url, i.image_url, i.baseline_cents, i.target_cents, i.last_seen_at observed_at, w.name list_name, w.id wishlist_id,
+  const rows = (await env.DB.prepare(`SELECT i.*, i.last_seen_at observed_at, w.name list_name, w.id wishlist_id,
     (SELECT o.price_cents FROM observations o JOIN runs r ON r.id=o.run_id AND r.status='recorded' WHERE o.item_id=i.id ORDER BY o.observed_at DESC LIMIT 1) current_cents
-    FROM items i JOIN wishlists w ON w.id=i.wishlist_id WHERE w.user_id=? AND i.alert_active=1 AND i.monitored=1
-    ORDER BY current_cents*1.0/i.baseline_cents ASC LIMIT 100`).bind(userId).all()).results;
+    FROM items i JOIN wishlists w ON w.id=i.wishlist_id WHERE w.user_id=? AND i.monitored=1 AND i.status='active'
+      AND EXISTS (SELECT 1 FROM items a WHERE COALESCE(a.edition_of,a.id)=COALESCE(i.edition_of,i.id) AND a.alert_active=1 AND a.monitored=1 AND a.status='active')
+    ORDER BY current_cents*1.0/i.baseline_cents ASC`).bind(userId).all()).results;
+  const enriched = await withPriceContext(env, rows);
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const row of enriched) {
+    const key = (row.edition_of as string | null) ?? row.id as string;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  const deals: Record<string, unknown>[] = [...groups.values()].flatMap(group => {
+    const priced = group.filter(item => item.current_cents !== null).sort((a, b) => (a.current_cents as number) - (b.current_cents as number));
+    return priced.length ? [{ ...priced[0], edition_count: group.length }] : [];
+  });
+  return deals.sort((a, b) => (a.current_cents as number) / (a.baseline_cents as number) - (b.current_cents as number) / (b.baseline_cents as number)).slice(0, 100);
 }
 
 export async function listWishlists(env: Env, userId: string) {
@@ -81,33 +131,83 @@ export async function listWishlists(env: Env, userId: string) {
 export async function getWishlist(env: Env, userId: string, id: string): Promise<{ wishlist: unknown; items: unknown[] } | null> {
   const wishlist = await env.DB.prepare('SELECT * FROM wishlists WHERE id=? AND user_id=?').bind(id, userId).first<WishlistRow>();
   if (!wishlist) return null;
-  const items = (await env.DB.prepare(`SELECT i.*,
+  const rows = (await env.DB.prepare(`SELECT i.*,
     (SELECT o.price_cents FROM observations o JOIN runs r ON r.id=o.run_id AND r.status='recorded' WHERE o.item_id=i.id ORDER BY o.observed_at DESC LIMIT 1) current_cents,
     (SELECT o.availability FROM observations o JOIN runs r ON r.id=o.run_id AND r.status='recorded' WHERE o.item_id=i.id ORDER BY o.observed_at DESC LIMIT 1) availability,
     i.last_seen_at observed_at,
-    (SELECT MIN(o.price_cents) FROM observations o JOIN runs r ON r.id=o.run_id AND r.status='recorded' WHERE o.item_id=i.id AND o.price_cents IS NOT NULL) lowest_cents
+    (SELECT p.title FROM items p WHERE p.id=i.edition_of) edition_title
     FROM items i WHERE i.wishlist_id=? ORDER BY i.created_at`).bind(id).all()).results;
+  const items = await withPriceContext(env, rows);
   const stale = !wishlist.last_success_at || Date.now() - Date.parse(wishlist.last_success_at) > (wishlist.frequency === 'hourly' ? 7_200_000 : 172_800_000);
   return { wishlist: { ...wishlist, stale }, items };
 }
 
-export async function updateWishlist(env: Env, userId: string, id: string, patch: { monitored?: boolean; frequency?: Frequency; addNewItems?: boolean; name?: string }) {
+export async function updateWishlist(env: Env, userId: string, id: string, patch: { monitored?: boolean; frequency?: Frequency; addNewItems?: boolean; name?: string; redropPct?: number | null }) {
   const current = await env.DB.prepare('SELECT * FROM wishlists WHERE id=? AND user_id=?').bind(id, userId).first<WishlistRow>();
   if (!current) return null;
   const monitored = patch.monitored ?? !!current.monitored, frequency = patch.frequency ?? current.frequency;
-  await env.DB.prepare('UPDATE wishlists SET monitored=?,frequency=?,add_new_items=?,name=?,next_due_at=? WHERE id=? AND user_id=?')
+  await env.DB.prepare('UPDATE wishlists SET monitored=?,frequency=?,add_new_items=?,name=?,next_due_at=?,redrop_pct=? WHERE id=? AND user_id=?')
     .bind(monitored ? 1 : 0, frequency, patch.addNewItems === undefined ? current.add_new_items : patch.addNewItems ? 1 : 0,
-      patch.name ?? current.name, !monitored ? null : patch.monitored === true ? nowIso() : current.next_due_at, id, userId).run();
+      patch.name ?? current.name, !monitored ? null : patch.monitored === true ? nowIso() : current.next_due_at,
+      patch.redropPct === undefined ? current.redrop_pct : patch.redropPct, id, userId).run();
   return getWishlist(env, userId, id);
 }
 
-export async function updateItem(env: Env, userId: string, itemId: string, patch: { monitored?: boolean; targetCents?: number | null; pctThreshold?: number }) {
+export async function updateItem(env: Env, userId: string, itemId: string, patch: { monitored?: boolean; targetCents?: number | null; pctThreshold?: number; priority?: Priority; status?: ItemStatus; snoozedUntil?: string | null; editionOf?: string | null }): Promise<Record<string, unknown> | null | { error: 'edition_chain' }> {
   const item = await env.DB.prepare('SELECT i.* FROM items i JOIN wishlists w ON w.id=i.wishlist_id WHERE i.id=? AND w.user_id=?').bind(itemId, userId).first<Record<string, unknown>>();
   if (!item) return null;
-  await env.DB.prepare(`UPDATE items SET monitored=?, target_cents=?, pct_threshold=? WHERE id=? AND EXISTS (SELECT 1 FROM wishlists w WHERE w.id=items.wishlist_id AND w.user_id=?)`)
+  if (patch.editionOf !== undefined && patch.editionOf !== null) {
+    const primary = await env.DB.prepare(`SELECT i.id,i.edition_of FROM items i JOIN wishlists w ON w.id=i.wishlist_id
+      WHERE i.id=? AND w.user_id=?`).bind(patch.editionOf, userId).first<{ id: string; edition_of: string | null }>();
+    const hasEditions = await env.DB.prepare('SELECT 1 FROM items WHERE edition_of=? LIMIT 1').bind(itemId).first();
+    if (!primary || primary.id === itemId || primary.edition_of || hasEditions) return { error: 'edition_chain' };
+  }
+  const status = patch.status ?? item.status as ItemStatus;
+  await env.DB.prepare(`UPDATE items SET monitored=?, target_cents=?, pct_threshold=?,priority=?,status=?,snoozed_until=?,edition_of=? WHERE id=? AND EXISTS (SELECT 1 FROM wishlists w WHERE w.id=items.wishlist_id AND w.user_id=?)`)
     .bind(patch.monitored === undefined ? item.monitored : patch.monitored ? 1 : 0, patch.targetCents === undefined ? item.target_cents : patch.targetCents,
-      patch.pctThreshold ?? item.pct_threshold, itemId, userId).run();
+      patch.pctThreshold ?? item.pct_threshold, patch.priority === undefined ? item.priority : patch.priority, status,
+      patch.status !== undefined && status !== 'snoozed' ? null : patch.snoozedUntil === undefined ? item.snoozed_until : patch.snoozedUntil,
+      patch.editionOf === undefined ? item.edition_of : patch.editionOf,
+      itemId, userId).run();
+  if (status === 'bought' || status === 'dropped') await env.DB.prepare('UPDATE items SET monitored=0 WHERE id=?').bind(itemId).run();
   return env.DB.prepare('SELECT * FROM items WHERE id=?').bind(itemId).first();
+}
+
+export async function buyNext(env: Env, userId: string, budgetCents: number) {
+  const rows = (await env.DB.prepare(`SELECT i.*,CASE WHEN p.id IS NULL THEN i.priority ELSE p.priority END effective_priority,
+      CASE WHEN p.id IS NULL THEN i.target_cents ELSE p.target_cents END effective_target_cents,
+      (SELECT o.price_cents FROM observations o JOIN runs r ON r.id=o.run_id AND r.status='recorded'
+      WHERE o.item_id=i.id ORDER BY o.observed_at DESC LIMIT 1) current_cents,i.last_seen_at observed_at
+    FROM items i JOIN wishlists w ON w.id=i.wishlist_id LEFT JOIN items p ON p.id=i.edition_of
+    WHERE w.user_id=? AND i.monitored=1 AND i.status='active'`).bind(userId).all()).results;
+  const enriched = await withPriceContext(env, rows);
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const row of enriched) {
+    if (row.current_cents === null || (row.current_cents as number) > budgetCents) continue;
+    const key = (row.edition_of as string | null) ?? row.id as string;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  const candidates = [...groups.values()].map(group => {
+    const item = group.sort((a, b) => (a.current_cents as number) - (b.current_cents as number))[0];
+    const price = item.current_cents as number, typical = item.typical_cents as number | null, days = Math.floor(item.days_observed as number);
+    const ok = item.coverage === 'ok', below = ok && typical ? Math.max(0, Math.min(1, (typical - price) / typical)) : 0;
+    const atLowest = ok && item.lowest_cents === price, targetHit = item.effective_target_cents !== null && price <= (item.effective_target_cents as number);
+    const quality = 1 + below + (atLowest ? .5 : 0) + (targetHit ? .5 : 0) + (item.alert_active ? .25 : 0);
+    const reasons: string[] = [];
+    if (item.effective_priority === 'must') reasons.push('must-have'); else if (item.effective_priority === 'interested') reasons.push('interested');
+    if (below > 0) reasons.push(`${Math.round(below * 100)}% below typical`);
+    if (atLowest) reasons.push(`lowest observed in ${days} days`);
+    if (targetHit) reasons.push('target hit');
+    if (!ok) reasons.push(`only ${days} days of history`);
+    const weight = item.effective_priority === 'must' ? 3 : item.effective_priority === 'interested' ? 2 : 1;
+    return { item: { ...item, id: item.id as string, edition_count: group.length }, priceCents: price, score: weight * quality, reasons, exceptional: quality > 1 || item.effective_priority !== null };
+  }).sort((a, b) => b.score - a.score || a.priceCents - b.priceCents);
+  const picks: typeof candidates = []; let total = 0, skipped = 0;
+  for (const candidate of candidates) {
+    if (!candidate.exceptional || total + candidate.priceCents > budgetCents) { skipped++; continue; }
+    picks.push(candidate); total += candidate.priceCents;
+  }
+  return { budgetCents, picks: picks.map(({ exceptional: _, ...pick }) => pick), leftoverCents: budgetCents - total, skipped, note: picks.length ? 'Items with no priority and nothing exceptional are skipped.' : 'Nothing exceptional fits the budget right now.' };
 }
 
 export async function itemHistory(env: Env, userId: string, itemId: string, options: { limit?: number } = {}) {
@@ -172,8 +272,12 @@ export async function recordCheck(env: Env, input: { runId: string; snapshot?: S
     return { alertsCreated: 0 };
   }
   if (!input.snapshot) throw new Error('recordCheck requires a snapshot or failure');
-  const storedRows = (await env.DB.prepare('SELECT * FROM items WHERE wishlist_id=?').bind(row.wishlist_id).all()).results;
+  await env.DB.prepare("UPDATE items SET status='active',snoozed_until=NULL WHERE wishlist_id=? AND status='snoozed' AND snoozed_until<=?")
+    .bind(row.wishlist_id, now.slice(0, 10)).run();
+  const storedRows = (await env.DB.prepare(`SELECT i.*,p.target_cents primary_target_cents,p.pct_threshold primary_pct_threshold,p.priority primary_priority
+    FROM items i LEFT JOIN items p ON p.id=i.edition_of WHERE i.wishlist_id=?`).bind(row.wishlist_id).all()).results;
   const stored = new Map(storedRows.map(r => [r.entry_id as string, storedItem(r)]));
+  const storedRaw = new Map(storedRows.map(r => [r.id as string, r]));
   // Only recorded runs are published; staged observations from an interrupted large run stay invisible.
   const latest = new Map((await env.DB.prepare(`SELECT o.item_id,o.price_cents,o.availability FROM observations o
     JOIN runs r ON r.id=o.run_id AND r.status='recorded' JOIN items i ON i.id=o.item_id
@@ -193,7 +297,7 @@ export async function recordCheck(env: Env, input: { runId: string; snapshot?: S
     if (!prior) {
       if (!row.add_new_items) continue;
       isNew = true;
-      prior = { ...item, id: `${String(row.wishlist_id)}:${item.entryId}`, monitored: 1, baselineCents: item.priceCents, targetCents: null, pctThreshold: 20, alertActive: 0 };
+      prior = { ...item, id: `${String(row.wishlist_id)}:${item.entryId}`, monitored: 1, baselineCents: item.priceCents, targetCents: null, pctThreshold: 20, alertActive: 0, lastAlertCents: null, priority: null, status: 'active', editionOf: null };
       staged.push(env.DB.prepare('INSERT OR IGNORE INTO items (id,wishlist_id,entry_id,asin,product_url,title,byline,image_url,baseline_cents,last_seen_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
         .bind(prior.id, row.wishlist_id, item.entryId, item.asin, item.productUrl, item.title, item.byline, item.imageUrl, item.priceCents, now, now));
     }
@@ -201,13 +305,17 @@ export async function recordCheck(env: Env, input: { runId: string; snapshot?: S
     if (!last || last.price_cents !== item.priceCents || last.availability !== item.availability)
       staged.push(env.DB.prepare('INSERT OR IGNORE INTO observations (item_id,run_id,observed_at,price_cents,currency,availability) VALUES (?,?,?,?,?,?)')
         .bind(prior.id, input.runId, now, item.priceCents, item.currency, item.availability));
-    const baseline = prior.baselineCents ?? item.priceCents;
-    const decision = prior.monitored && row.monitored ? decideAlert({ priceCents: isNew || prior.baselineCents === null ? null : item.priceCents, baselineCents: baseline, targetCents: prior.targetCents, pctThreshold: prior.pctThreshold, alertActive: !!prior.alertActive })
+    const baseline = prior.baselineCents ?? item.priceCents, raw = storedRaw.get(prior.id);
+    const decision = prior.monitored && row.monitored && prior.status === 'active' ? decideAlert({ priceCents: isNew || prior.baselineCents === null ? null : item.priceCents, baselineCents: baseline,
+      targetCents: prior.editionOf ? raw?.primary_target_cents as number | null : prior.targetCents, pctThreshold: prior.editionOf ? raw?.primary_pct_threshold as number : prior.pctThreshold,
+      alertActive: !!prior.alertActive, lastAlertCents: prior.lastAlertCents, redropPct: row.redrop_pct as number | null })
       : { qualifies: false, kind: null, nextAlertActive: !!prior.alertActive };
-    state.push(env.DB.prepare('UPDATE items SET asin=?,product_url=?,title=?,byline=?,image_url=?,last_seen_at=?,baseline_cents=COALESCE(baseline_cents,?),alert_active=? WHERE id=?')
-      .bind(item.asin, item.productUrl, item.title, item.byline, item.imageUrl, now, item.priceCents, decision.nextAlertActive ? 1 : 0, prior.id));
-    stateRows.push({ id: prior.id, asin: item.asin, productUrl: item.productUrl, title: item.title, byline: item.byline, imageUrl: item.imageUrl, lastSeenAt: now, priceCents: item.priceCents, alertActive: decision.nextAlertActive ? 1 : 0 });
-    if (decision.qualifies && !prior.alertActive && decision.kind && item.priceCents !== null && baseline !== null) {
+    const createAlert = decision.qualifies && (!prior.alertActive || decision.kind === 'redrop') && !!decision.kind && item.priceCents !== null && baseline !== null;
+    const lastAlertCents = createAlert ? item.priceCents : decision.nextAlertActive ? prior.lastAlertCents : null;
+    state.push(env.DB.prepare('UPDATE items SET asin=?,product_url=?,title=?,byline=?,image_url=?,last_seen_at=?,baseline_cents=COALESCE(baseline_cents,?),alert_active=?,last_alert_cents=? WHERE id=?')
+      .bind(item.asin, item.productUrl, item.title, item.byline, item.imageUrl, now, item.priceCents, decision.nextAlertActive ? 1 : 0, lastAlertCents, prior.id));
+    stateRows.push({ id: prior.id, asin: item.asin, productUrl: item.productUrl, title: item.title, byline: item.byline, imageUrl: item.imageUrl, lastSeenAt: now, priceCents: item.priceCents, alertActive: decision.nextAlertActive ? 1 : 0, lastAlertCents });
+    if (createAlert) {
       alertsCreated++;
       alertRows.push({ id: `${input.runId}:${prior.id}`, wishlistId: row.wishlist_id, itemId: prior.id, runId: input.runId, kind: decision.kind, baselineCents: baseline, priceCents: item.priceCents, title: item.title, productUrl: item.productUrl, createdAt: now });
     }
@@ -223,7 +331,7 @@ export async function recordCheck(env: Env, input: { runId: string; snapshot?: S
       ) UPDATE items SET asin=(SELECT asin FROM changes WHERE changes.id=items.id),product_url=(SELECT product_url FROM changes WHERE changes.id=items.id),
         title=(SELECT title FROM changes WHERE changes.id=items.id),byline=(SELECT byline FROM changes WHERE changes.id=items.id),image_url=(SELECT image_url FROM changes WHERE changes.id=items.id),
         last_seen_at=(SELECT last_seen_at FROM changes WHERE changes.id=items.id),baseline_cents=COALESCE(baseline_cents,(SELECT price_cents FROM changes WHERE changes.id=items.id)),
-        alert_active=(SELECT alert_active FROM changes WHERE changes.id=items.id) WHERE id IN (SELECT id FROM changes)`).bind(JSON.stringify(stateRows)));
+        alert_active=(SELECT alert_active FROM changes WHERE changes.id=items.id),last_alert_cents=(SELECT json_extract(value,'$.lastAlertCents') FROM json_each(?) WHERE json_extract(value,'$.id')=items.id) WHERE id IN (SELECT id FROM changes)`).bind(JSON.stringify(stateRows), JSON.stringify(stateRows)));
     if (alertRows.length) final.push(env.DB.prepare(`INSERT OR IGNORE INTO alerts (id,wishlist_id,item_id,run_id,kind,baseline_cents,price_cents,title,product_url,created_at)
       SELECT json_extract(value,'$.id'),json_extract(value,'$.wishlistId'),json_extract(value,'$.itemId'),json_extract(value,'$.runId'),json_extract(value,'$.kind'),
         json_extract(value,'$.baselineCents'),json_extract(value,'$.priceCents'),json_extract(value,'$.title'),json_extract(value,'$.productUrl'),json_extract(value,'$.createdAt') FROM json_each(?)`).bind(JSON.stringify(alertRows)));

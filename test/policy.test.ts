@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decideAlert, looksSystematic } from '../src/watches';
+import { decideAlert, looksSystematic, priceContext } from '../src/watches';
 
 const decide = (priceCents: number | null, overrides: Partial<Parameters<typeof decideAlert>[0]> = {}) => decideAlert({ priceCents, baselineCents: 10_000, targetCents: null, pctThreshold: 20, alertActive: false, ...overrides });
 describe('alert transition policy', () => {
@@ -14,6 +14,21 @@ describe('alert transition policy', () => {
     expect(decide(9000, { alertActive: true })).toMatchObject({ qualifies: false, nextAlertActive: false });
     expect(decide(null, { alertActive: true })).toMatchObject({ qualifies: false, nextAlertActive: true });
     expect(decide(0, { baselineCents: 0, alertActive: true })).toMatchObject({ qualifies: false, nextAlertActive: true });
+  });
+  it('only repeats an active alert after the configured further drop', () => {
+    expect(decide(7900)).toMatchObject({ qualifies: true, kind: 'pct' });
+    expect(decide(7000, { alertActive: true, lastAlertCents: 7900, redropPct: 20 }).kind).not.toBe('redrop');
+    expect(decide(4000, { alertActive: true, lastAlertCents: 7900, redropPct: 20 })).toMatchObject({ qualifies: true, kind: 'redrop' });
+    expect(decide(4000, { alertActive: true, lastAlertCents: 7900, redropPct: null }).kind).not.toBe('redrop');
+  });
+});
+
+describe('price context', () => {
+  const at = (day: number, price_cents: number | null) => ({ observed_at: new Date(Date.UTC(2026, 0, day + 1)).toISOString(), price_cents });
+  it('weights prices by time and reports honest coverage', () => {
+    expect(priceContext([at(0, 1000)], at(10, 0).observed_at)).toEqual({ typicalCents: 1000, lowestCents: 1000, daysObserved: 10, coverage: 'thin' });
+    expect(priceContext([at(0, 1000), at(29, 2000), at(30, 1000)], at(31, 0).observed_at)).toMatchObject({ typicalCents: 1000, lowestCents: 1000, daysObserved: 31, coverage: 'ok' });
+    expect(priceContext([at(0, 1000), at(10, null), at(20, 2000)], at(30, 0).observed_at)).toMatchObject({ typicalCents: 1000, daysObserved: 20, coverage: 'ok' });
   });
 });
 

@@ -1,6 +1,6 @@
 import { resolveUser } from './identity';
 import { sendTestEmail } from './notify';
-import { abandonRun, deliveriesForWishlist, dueWishlists, getRun, getWishlist, importWishlist, itemHistory, listDeals, listWishlists, requestManualCheck, startRun, updateItem, updateWishlist } from './watches';
+import { abandonRun, buyNext, deliveriesForWishlist, dueWishlists, getRun, getWishlist, importWishlist, itemHistory, listDeals, listWishlists, requestManualCheck, startRun, updateItem, updateWishlist } from './watches';
 export { CheckWorkflow } from './workflow';
 export { UsFetcher } from './fetcher';
 
@@ -10,6 +10,8 @@ async function body(request: Request): Promise<Record<string, unknown> | null> {
   try { const value: unknown = await request.json(); return object(value) ? value : null; } catch { return null; }
 }
 const only = (value: Record<string, unknown>, fields: string[]) => Object.keys(value).every(key => fields.includes(key));
+const isoDate = (value: unknown): value is string => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+  && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 
 async function api(request: Request, env: Env): Promise<Response> {
   const user = await resolveUser(request, env);
@@ -18,6 +20,10 @@ async function api(request: Request, env: Env): Promise<Response> {
   if (request.method === 'GET' && path === '/api/me') return json(user);
   if (request.method === 'GET' && path === '/api/wishlists') return json(await listWishlists(env, user.id));
   if (request.method === 'GET' && path === '/api/deals') return json(await listDeals(env, user.id));
+  if (request.method === 'GET' && path === '/api/buy-next') {
+    const budget = Number(url.searchParams.get('budget'));
+    return Number.isInteger(budget) && budget >= 500 && budget <= 1_000_000 ? json(await buyNext(env, user.id, budget)) : json({ error: 'invalid_request' }, 400);
+  }
   const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
   if (runMatch && request.method === 'GET') {
     const run = await getRun(env, user.id, runMatch[1]);
@@ -41,11 +47,12 @@ async function api(request: Request, env: Env): Promise<Response> {
   }
   if (wishlistMatch && request.method === 'PATCH') {
     const data = await body(request);
-    if (!data || !only(data, ['monitored', 'frequency', 'addNewItems', 'name'])
+    if (!data || !only(data, ['monitored', 'frequency', 'addNewItems', 'name', 'redropPct'])
       || (data.monitored !== undefined && typeof data.monitored !== 'boolean')
       || (data.addNewItems !== undefined && typeof data.addNewItems !== 'boolean')
       || (data.frequency !== undefined && !['daily', 'hourly'].includes(data.frequency as string))
-      || (data.name !== undefined && (typeof data.name !== 'string' || !data.name.trim() || data.name.length > 200))) return json({ error: 'invalid_request' }, 400);
+      || (data.name !== undefined && (typeof data.name !== 'string' || !data.name.trim() || data.name.length > 200))
+      || (data.redropPct !== undefined && data.redropPct !== null && (!Number.isInteger(data.redropPct) || (data.redropPct as number) < 5 || (data.redropPct as number) > 90))) return json({ error: 'invalid_request' }, 400);
     const result = await updateWishlist(env, user.id, wishlistMatch[1], { ...data, name: typeof data.name === 'string' ? data.name.trim() : undefined });
     return result ? json(result) : json({ error: 'not_found' }, 404);
   }
@@ -63,12 +70,17 @@ async function api(request: Request, env: Env): Promise<Response> {
   const itemMatch = path.match(/^\/api\/items\/([^/]+)$/);
   if (itemMatch && request.method === 'PATCH') {
     const data = await body(request);
-    if (!data || !only(data, ['monitored', 'targetCents', 'pctThreshold'])
+    if (!data || !only(data, ['monitored', 'targetCents', 'pctThreshold', 'priority', 'status', 'snoozedUntil', 'editionOf'])
       || (data.monitored !== undefined && typeof data.monitored !== 'boolean')
       || (data.targetCents !== undefined && data.targetCents !== null && (!Number.isInteger(data.targetCents) || (data.targetCents as number) < 0))
-      || (data.pctThreshold !== undefined && (!Number.isInteger(data.pctThreshold) || (data.pctThreshold as number) < 1 || (data.pctThreshold as number) > 99))) return json({ error: 'invalid_request' }, 400);
+      || (data.pctThreshold !== undefined && (!Number.isInteger(data.pctThreshold) || (data.pctThreshold as number) < 1 || (data.pctThreshold as number) > 99))
+      || (data.priority !== undefined && data.priority !== null && !['must', 'interested', 'someday'].includes(data.priority as string))
+      || (data.status !== undefined && !['active', 'bought', 'dropped', 'snoozed'].includes(data.status as string))
+      || (data.snoozedUntil !== undefined && data.snoozedUntil !== null && !isoDate(data.snoozedUntil))
+      || (data.status === 'snoozed' && !isoDate(data.snoozedUntil))
+      || (data.editionOf !== undefined && data.editionOf !== null && typeof data.editionOf !== 'string')) return json({ error: 'invalid_request' }, 400);
     const result = await updateItem(env, user.id, itemMatch[1], data);
-    return result ? json(result) : json({ error: 'not_found' }, 404);
+    return result && 'error' in result ? json(result, 400) : result ? json(result) : json({ error: 'not_found' }, 404);
   }
   const historyMatch = path.match(/^\/api\/items\/([^/]+)\/history$/);
   if (historyMatch && request.method === 'GET') {

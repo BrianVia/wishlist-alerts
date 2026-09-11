@@ -19,6 +19,8 @@ This is a personal tool. It is not affiliated with Amazon, and scraping Amazon p
 - Current, first-seen, and lowest price per item, with history.
 - Daily or hourly checks, pause/resume, "check now".
 - Per-item target price and percent threshold, per-item on/off.
+- Time-weighted typical/lowest price context, priority and purchase feedback.
+- Optional further-drop alerts, acceptable-edition links, and a budget-aware "Buy next" plan.
 - One batched email per check listing everything that qualified.
 - Honest health: each list shows ok, stale, private, blocked, or the last error. A failed check never touches your prices.
 - Sanity guards: prices in a non-USD currency, or a whole list shifting by one identical ratio, fail the check instead of firing alerts.
@@ -120,12 +122,13 @@ All routes require identity. Bodies are JSON. IDs come from the route, never the
 | GET | `/api/me` | |
 | GET | `/api/wishlists` | |
 | GET | `/api/deals` | items currently below their first-seen price, across all lists |
+| GET | `/api/buy-next?budget=6000` | ranked picks within a budget in cents |
 | GET | `/api/runs/:id` | owner-scoped check status |
 | POST | `/api/wishlists` | `{url, frequency?: "daily"\|"hourly", addNewItems?}` |
 | GET | `/api/wishlists/:id` | |
-| PATCH | `/api/wishlists/:id` | `{monitored?, frequency?, addNewItems?, name?}` |
+| PATCH | `/api/wishlists/:id` | `{monitored?, frequency?, addNewItems?, name?, redropPct?}` |
 | POST | `/api/wishlists/:id/check` | (max one per 5 minutes) |
-| PATCH | `/api/items/:id` | `{monitored?, targetCents?: number\|null, pctThreshold?: 1..99}` |
+| PATCH | `/api/items/:id` | watch settings, priority/status feedback, or `editionOf` |
 | GET | `/api/items/:id/history` | |
 | POST | `/api/test-email` | sends to the caller only |
 

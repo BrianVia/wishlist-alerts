@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import type { Snapshot, SnapshotItem } from '../src/collect';
-import { alertsForRun, deliveriesForWishlist, getWishlist, importWishlist, itemHistory, recordCheck, requestManualCheck, startRun, updateItem, updateWishlist } from '../src/watches';
+import { alertsForRun, buyNext, deliveriesForWishlist, getWishlist, importWishlist, itemHistory, recordCheck, requestManualCheck, startRun, updateItem, updateWishlist } from '../src/watches';
 
 const item = (entryId: string, priceCents: number | null): SnapshotItem => ({ entryId, asin: 'B012345678', productUrl: 'https://www.amazon.com/dp/B012345678', title: `Item ${entryId}`, byline: null, imageUrl: null, priceCents, currency: 'USD', availability: priceCents === null ? 'no_price' : 'priced' });
 const snapshot = (...items: SnapshotItem[]): Snapshot => ({ ok: true, url: 'https://www.amazon.com/hz/wishlist/ls/ABC123', name: 'Test list', items, pages: 1, complete: true, durationMs: 5, usedBrowser: false });
@@ -52,6 +52,40 @@ describe('owner-scoped persistence and transitions', () => {
     await check(id, 'recover', snapshot(item('one', 9000)), 40_000);
     const drop2 = await check(id, 'drop2', snapshot(item('one', 7999)), 50_000);
     expect(await alertsForRun(env, drop2)).toHaveLength(1);
+  });
+
+  it('records opt-in further-drop alerts and clears their anchor on recovery', async () => {
+    const list = await imported(), id = list.wishlist.id, itemId = list.items[0].id;
+    await updateWishlist(env, 'a', id, { redropPct: 20 });
+    await check(id, 'drop', snapshot(item('one', 7900)), 10_000);
+    expect((await env.DB.prepare('SELECT last_alert_cents FROM items WHERE id=?').bind(itemId).first())).toMatchObject({ last_alert_cents: 7900 });
+    expect(await alertsForRun(env, await check(id, 'not-enough', snapshot(item('one', 7000)), 20_000))).toHaveLength(0);
+    const redrop = await check(id, 'redrop', snapshot(item('one', 4000)), 30_000);
+    expect(await alertsForRun(env, redrop)).toMatchObject([{ kind: 'redrop', price_cents: 4000 }]);
+    expect((await env.DB.prepare('SELECT last_alert_cents FROM items WHERE id=?').bind(itemId).first())).toMatchObject({ last_alert_cents: 4000 });
+    await check(id, 'recover-redrop', snapshot(item('one', 9000)), 40_000);
+    expect((await env.DB.prepare('SELECT alert_active,last_alert_cents FROM items WHERE id=?').bind(itemId).first())).toMatchObject({ alert_active: 0, last_alert_cents: null });
+  });
+
+  it('ranks affordable priorities and validates edition links', async () => {
+    const list = await imported([item('one', 4000), item('two', 3000)]), [one, two] = list.items;
+    await updateItem(env, 'a', one.id, { priority: 'must' });
+    await updateItem(env, 'a', two.id, { targetCents: 3000 });
+    const plan = await buyNext(env, 'a', 6000);
+    expect(plan.picks.map(pick => pick.item.id)).toEqual([one.id]);
+    expect(plan).toMatchObject({ leftoverCents: 2000, skipped: 1 });
+    expect(await updateItem(env, 'a', two.id, { editionOf: one.id })).toMatchObject({ edition_of: one.id });
+    expect(await updateItem(env, 'a', one.id, { editionOf: two.id })).toEqual({ error: 'edition_chain' });
+  });
+
+  it('hides snoozed feedback and reactivates it on a later check', async () => {
+    const list = await imported(), id = list.wishlist.id, itemId = list.items[0].id;
+    await updateItem(env, 'a', itemId, { priority: 'must', status: 'snoozed', snoozedUntil: '2000-01-01' });
+    expect((await buyNext(env, 'a', 20_000)).picks).toHaveLength(0);
+    await check(id, 'wake', snapshot(item('one', 10_000)), 10_000);
+    expect((await env.DB.prepare('SELECT status,snoozed_until FROM items WHERE id=?').bind(itemId).first())).toMatchObject({ status: 'active', snoozed_until: null });
+    await updateItem(env, 'a', itemId, { status: 'bought' });
+    expect((await env.DB.prepare('SELECT status,monitored FROM items WHERE id=?').bind(itemId).first())).toMatchObject({ status: 'bought', monitored: 0 });
   });
 
   it('preserves facts on failure and rejects duplicate and stale runs', async () => {

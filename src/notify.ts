@@ -1,3 +1,5 @@
+import { priceContext } from './watches';
+
 type DeliveryResult = { status: 'sent' | 'failed' | 'skipped'; messageId?: string };
 
 export const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
@@ -17,18 +19,29 @@ export async function deliverPending(env: Env, runId: string): Promise<DeliveryR
     await env.DB.prepare("UPDATE deliveries SET status='failed',last_error='no alerts' WHERE run_id=?").bind(runId).run();
     return { status: 'skipped' };
   }
+  const history = (await env.DB.prepare(`SELECT o.item_id,o.observed_at,o.price_cents,i.last_seen_at FROM observations o
+    JOIN runs r ON r.id=o.run_id AND r.status='recorded' JOIN items i ON i.id=o.item_id
+    WHERE o.item_id IN (SELECT item_id FROM alerts WHERE run_id=?) ORDER BY o.observed_at`).bind(runId).all<Record<string, unknown>>()).results;
+  const context = new Map<string, ReturnType<typeof priceContext>>();
+  for (const alert of alerts) {
+    const rows = history.filter(row => row.item_id === alert.item_id).map(row => ({ observed_at: row.observed_at as string, price_cents: row.price_cents as number | null }));
+    context.set(alert.item_id as string, priceContext(rows, (history.find(row => row.item_id === alert.item_id)?.last_seen_at as string | undefined) ?? alert.created_at as string));
+  }
+  const line = (alert: Record<string, unknown>) => {
+    const baseline = alert.baseline_cents as number, price = alert.price_cents as number, ctx = context.get(alert.item_id as string)!;
+    const historyText = ctx.coverage === 'ok' ? `usually about ${dollars(ctx.typicalCents!)} over ${Math.floor(ctx.daysObserved)} days · lowest ${dollars(ctx.lowestCents!)}` : `only ${Math.floor(ctx.daysObserved)} days of history`;
+    return `Was ${dollars(baseline)} (first seen) · ${historyText} · now ${dollars(price)} (${Math.round((1 - price / baseline) * 100)}% off)`;
+  };
   const subject = `Price drop: ${alerts.length} item(s) on ${wishlist.name.replace(/[\r\n]+/g, ' ')}`;
   const htmlItems = alerts.map(alert => {
-    const baseline = alert.baseline_cents as number, price = alert.price_cents as number;
     const link = (alert.product_url as string).startsWith('https://www.amazon.com/') ? `<br><a href="${escapeHtml(alert.product_url as string)}">View on Amazon</a>` : '';
     const target = alert.kind === 'target' || alert.kind === 'both' ? '<br>Target price reached.' : '';
-    return `<li><strong>${escapeHtml(alert.title as string)}</strong><br>Was ${dollars(baseline)} (first seen), now ${dollars(price)} — ${Math.round((1 - price / baseline) * 100)}% off${target}${link}</li>`;
+    return `<li><strong>${escapeHtml(alert.title as string)}</strong><br>${line(alert)}${target}${link}</li>`;
   }).join('');
   const textItems = alerts.map(alert => {
-    const baseline = alert.baseline_cents as number, price = alert.price_cents as number;
     const link = (alert.product_url as string).startsWith('https://www.amazon.com/') ? `\n${alert.product_url}` : '';
     const target = alert.kind === 'target' || alert.kind === 'both' ? '\nTarget price reached.' : '';
-    return `${alert.title}\nWas ${dollars(baseline)} (first seen), now ${dollars(price)} — ${Math.round((1 - price / baseline) * 100)}% off${target}${link}`;
+    return `${alert.title}\n${line(alert)}${target}${link}`;
   }).join('\n\n');
   try {
     const sent = await env.EMAIL.send({
