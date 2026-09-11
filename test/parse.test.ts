@@ -31,6 +31,9 @@ describe('Amazon wishlist parsing', () => {
     expect(page.foreignCurrency).toBe('€');
     expect(page.items[0].priceCents).toBeNull();
   });
+  it('treats $0.00 as no price', () => {
+    expect(parseWishlistPage(normal.replace('$49.99', '$0.00')).items[0].priceCents).toBeNull();
+  });
   it('canonicalizes only Amazon US shared-list URLs', () => {
     expect(canonicalizeWishlistUrl('https://amazon.com/hz/wishlist/ls/ABC123?ref=x#y')).toBe('https://www.amazon.com/hz/wishlist/ls/ABC123');
     expect(canonicalizeWishlistUrl('http://amazon.com/hz/wishlist/ls/ABC')).toBeNull();

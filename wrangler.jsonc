@@ -16,6 +16,8 @@
     "binding": "CHECK_WORKFLOW",
     "class_name": "CheckWorkflow"
   }],
+  "durable_objects": { "bindings": [{ "name": "US_FETCH", "class_name": "UsFetcher" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UsFetcher"] }],
   "send_email": [{ "name": "EMAIL" }],
   "assets": { "directory": "./public", "binding": "ASSETS" },
   "triggers": { "crons": ["0 * * * *"] },

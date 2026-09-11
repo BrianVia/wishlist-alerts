@@ -1,5 +1,6 @@
 import puppeteer from '@cloudflare/puppeteer';
 import { load } from 'cheerio';
+import { usFetch } from './fetcher';
 
 export type SnapshotItem = {
   entryId: string; asin: string | null; productUrl: string; title: string;
@@ -24,7 +25,8 @@ export function canonicalizeWishlistUrl(input: string): string | null {
 
 function money(text: string | undefined): number | null {
   const match = text?.trim().match(/^\$\s?([\d,]+)\.(\d{2})$/);
-  return match ? Number(match[1].replaceAll(',', '')) * 100 + Number(match[2]) : null;
+  const cents = match ? Number(match[1].replaceAll(',', '')) * 100 + Number(match[2]) : null;
+  return cents ? cents : null;
 }
 
 export function parseWishlistPage(html: string): { name: string; items: SnapshotItem[]; nextUrl: string | null; endOfList: boolean; state: 'list' | 'blocked' | 'login' | 'not_found' | 'private' | 'unknown'; foreignCurrency: string | null } {
@@ -127,8 +129,9 @@ async function collectWith(loader: (url: string, timeout: number) => Promise<{ h
 export async function collectWishlist(input: string, env: Env): Promise<CollectionResult> {
   const url = canonicalizeWishlistUrl(input), started = Date.now();
   if (!url) return failure('invalid_url', 'Use a shared Amazon US wishlist URL', 0, started, false);
+  const fetchUs = usFetch(env);
   const fetched = await collectWith(async (pageUrl, timeout) => {
-    const response = await fetch(pageUrl, { headers: { 'User-Agent': UA, 'Accept-Language': 'en-US', Cookie: 'i18n-prefs=USD; lc-main=en_US' }, signal: AbortSignal.timeout(Math.min(timeout, 20_000)) });
+    const response = await fetchUs(pageUrl, { headers: { 'User-Agent': UA, 'Accept-Language': 'en-US', Cookie: 'i18n-prefs=USD; lc-main=en_US' }, signal: AbortSignal.timeout(Math.min(timeout, 20_000)) });
     return { html: await response.text(), url: response.url, status: response.status, contentType: response.headers.get('content-type') };
   }, url, started, false);
   if (fetched.ok || fetched.reason !== 'blocked') return fetched;

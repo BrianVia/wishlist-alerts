@@ -83,6 +83,14 @@ describe('owner-scoped persistence and transitions', () => {
     expect(Date.parse(view.observed_at)).toBeGreaterThan(Date.now() - 60_000);
   });
 
+  it('rejects a run whose priced count collapsed versus the last check', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => item(`e${i}`, 1000 + i));
+    const list = await imported(many), id = list.wishlist.id;
+    const runId = await check(id, 'collapse', snapshot(...many.map((it, i) => (i < 10 ? it : { ...it, priceCents: null, availability: 'no_price' as const }))), 10_000);
+    expect(await env.DB.prepare('SELECT status,error FROM runs WHERE id=?').bind(runId).first()).toMatchObject({ status: 'failed', error: 'suspect' });
+    expect((await env.DB.prepare('SELECT COUNT(*) n FROM observations').first<{ n: number }>())!.n).toBe(30);
+  });
+
   it('stages large checks but commits success state in the final batch', async () => {
     const list = await imported(), id = list.wishlist.id;
     const items = Array.from({ length: 101 }, (_, index) => item(index ? `new-${index}` : 'one', 10_000 - index));

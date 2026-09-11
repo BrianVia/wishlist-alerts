@@ -159,7 +159,10 @@ export async function recordCheck(env: Env, input: { runId: string; snapshot?: S
   if (!input.snapshot) throw new Error('recordCheck requires a snapshot or failure');
   const storedRows = (await env.DB.prepare('SELECT * FROM items WHERE wishlist_id=?').bind(row.wishlist_id).all()).results;
   const stored = new Map(storedRows.map(r => [r.entry_id as string, storedItem(r)]));
-  const suspect = looksSystematic(input.snapshot.items.map(i => ({ priceCents: i.priceCents, baselineCents: stored.get(i.entryId)?.baselineCents ?? null })));
+  const lastPriced = (await env.DB.prepare("SELECT priced_count FROM runs WHERE wishlist_id=? AND status='recorded' AND id<>? ORDER BY started_at DESC LIMIT 1").bind(row.wishlist_id, input.runId).first<{ priced_count: number | null }>())?.priced_count ?? null;
+  const priced = input.snapshot.items.filter(i => i.priceCents !== null).length;
+  const suspect = looksSystematic(input.snapshot.items.map(i => ({ priceCents: i.priceCents, baselineCents: stored.get(i.entryId)?.baselineCents ?? null })))
+    ?? (lastPriced !== null && lastPriced >= 20 && priced * 100 < lastPriced * 60 ? `only ${priced} priced items where the last check had ${lastPriced}` : null);
   if (suspect) return recordCheck(env, { runId: input.runId, failure: { ok: false, reason: 'suspect', detail: suspect, pages: input.snapshot.pages, durationMs: input.snapshot.durationMs, usedBrowser: input.snapshot.usedBrowser } });
   // ponytail: history is write-on-change; last_seen_at carries freshness. Revisit if a chart needs per-check samples.
   const latest = new Map((await env.DB.prepare(`SELECT o.item_id, o.price_cents, o.availability FROM observations o JOIN items i ON i.id=o.item_id

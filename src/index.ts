@@ -2,6 +2,7 @@ import { resolveUser } from './identity';
 import { sendTestEmail } from './notify';
 import { abandonRun, deliveriesForWishlist, dueWishlists, getWishlist, importWishlist, itemHistory, listWishlists, requestManualCheck, startRun, updateItem, updateWishlist } from './watches';
 export { CheckWorkflow } from './workflow';
+export { UsFetcher } from './fetcher';
 
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
