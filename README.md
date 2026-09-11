@@ -11,6 +11,7 @@ This is a personal tool. It is not affiliated with Amazon, and scraping Amazon p
 ## What you get
 
 - Import any shared Amazon US wishlist by URL. New items are picked up on later checks.
+- A "Current deals" strip at the top: every item below its first-seen price, across all lists, biggest drop first.
 - Current, first-seen, and lowest price per item, with history.
 - Daily or hourly checks, pause/resume, "check now".
 - Per-item target price and percent threshold, per-item on/off.
@@ -112,6 +113,7 @@ All routes require identity. Bodies are JSON. IDs come from the route, never the
 |---|---|---|
 | GET | `/api/me` | |
 | GET | `/api/wishlists` | |
+| GET | `/api/deals` | items currently below their first-seen price, across all lists |
 | POST | `/api/wishlists` | `{url, frequency?: "daily"\|"hourly", addNewItems?}` |
 | GET | `/api/wishlists/:id` | |
 | PATCH | `/api/wishlists/:id` | `{monitored?, frequency?, addNewItems?, name?}` |

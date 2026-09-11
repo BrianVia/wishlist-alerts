@@ -1,6 +1,6 @@
 import { resolveUser } from './identity';
 import { sendTestEmail } from './notify';
-import { abandonRun, deliveriesForWishlist, dueWishlists, getWishlist, importWishlist, itemHistory, listWishlists, requestManualCheck, startRun, updateItem, updateWishlist } from './watches';
+import { abandonRun, deliveriesForWishlist, dueWishlists, getWishlist, importWishlist, itemHistory, listDeals, listWishlists, requestManualCheck, startRun, updateItem, updateWishlist } from './watches';
 export { CheckWorkflow } from './workflow';
 export { UsFetcher } from './fetcher';
 
@@ -17,6 +17,7 @@ async function api(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url), path = url.pathname;
   if (request.method === 'GET' && path === '/api/me') return json(user);
   if (request.method === 'GET' && path === '/api/wishlists') return json(await listWishlists(env, user.id));
+  if (request.method === 'GET' && path === '/api/deals') return json(await listDeals(env, user.id));
   if (request.method === 'POST' && path === '/api/wishlists') {
     const data = await body(request);
     if (!data || !only(data, ['url', 'frequency', 'addNewItems']) || typeof data.url !== 'string'

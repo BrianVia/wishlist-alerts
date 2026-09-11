@@ -61,6 +61,13 @@ export async function importWishlist(
   return (await getWishlist(env, userId, id))!;
 }
 
+export async function listDeals(env: Env, userId: string) {
+  return (await env.DB.prepare(`SELECT i.id, i.title, i.product_url, i.image_url, i.baseline_cents, i.target_cents, i.last_seen_at observed_at, w.name list_name, w.id wishlist_id,
+    (SELECT o.price_cents FROM observations o WHERE o.item_id=i.id ORDER BY o.observed_at DESC LIMIT 1) current_cents
+    FROM items i JOIN wishlists w ON w.id=i.wishlist_id WHERE w.user_id=? AND i.alert_active=1 AND i.monitored=1
+    ORDER BY current_cents*1.0/i.baseline_cents ASC LIMIT 100`).bind(userId).all()).results;
+}
+
 export async function listWishlists(env: Env, userId: string) {
   const rows = (await env.DB.prepare(`SELECT w.*, COUNT(i.id) item_count FROM wishlists w LEFT JOIN items i ON i.wishlist_id=w.id WHERE w.user_id=? GROUP BY w.id ORDER BY w.created_at`).bind(userId).all()).results;
   const now = Date.now();
