@@ -5,3 +5,5 @@ dist
 .codex-run.log
 CODEX-LAST.md
 wrangler.local.jsonc
+SPEC-2.md
+APP_REVIEW.md

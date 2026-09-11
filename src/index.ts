@@ -1,6 +1,6 @@
 import { resolveUser } from './identity';
 import { sendTestEmail } from './notify';
-import { abandonRun, deliveriesForWishlist, dueWishlists, getWishlist, importWishlist, itemHistory, listDeals, listWishlists, requestManualCheck, startRun, updateItem, updateWishlist } from './watches';
+import { abandonRun, deliveriesForWishlist, dueWishlists, getRun, getWishlist, importWishlist, itemHistory, listDeals, listWishlists, requestManualCheck, startRun, updateItem, updateWishlist } from './watches';
 export { CheckWorkflow } from './workflow';
 export { UsFetcher } from './fetcher';
 
@@ -18,6 +18,11 @@ async function api(request: Request, env: Env): Promise<Response> {
   if (request.method === 'GET' && path === '/api/me') return json(user);
   if (request.method === 'GET' && path === '/api/wishlists') return json(await listWishlists(env, user.id));
   if (request.method === 'GET' && path === '/api/deals') return json(await listDeals(env, user.id));
+  const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
+  if (runMatch && request.method === 'GET') {
+    const run = await getRun(env, user.id, runMatch[1]);
+    return run ? json(run) : json({ error: 'not_found' }, 404);
+  }
   if (request.method === 'POST' && path === '/api/wishlists') {
     const data = await body(request);
     if (!data || !only(data, ['url', 'frequency', 'addNewItems']) || typeof data.url !== 'string'
@@ -47,7 +52,7 @@ async function api(request: Request, env: Env): Promise<Response> {
   const checkMatch = path.match(/^\/api\/wishlists\/([^/]+)\/check$/);
   if (checkMatch && request.method === 'POST') {
     const requested = await requestManualCheck(env, user.id, checkMatch[1], Date.now());
-    if ('error' in requested) return json({ error: requested.error }, requested.error === 'rate_limited' ? 429 : requested.error === 'paused' ? 409 : 404);
+    if ('error' in requested) return json({ error: requested.error }, requested.error === 'rate_limited' ? 429 : requested.error === 'busy' || requested.error === 'paused' ? 409 : 404);
     const wishlist = await getWishlist(env, user.id, checkMatch[1]);
     const source = (wishlist?.wishlist as { source_url?: string } | undefined)?.source_url;
     if (!source) return json({ error: 'not_found' }, 404);

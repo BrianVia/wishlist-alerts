@@ -23,6 +23,8 @@ This is a personal tool. It is not affiliated with Amazon, and scraping Amazon p
 - Honest health: each list shows ok, stale, private, blocked, or the last error. A failed check never touches your prices.
 - Sanity guards: prices in a non-USD currency, or a whole list shifting by one identical ratio, fail the check instead of firing alerts.
 
+A coordinated price shift is rejected as suspect. If it is a legitimate storewide sale, the list can be re-run manually.
+
 ## Quick start (local)
 
 Needs Node 24 and npm.
@@ -118,6 +120,7 @@ All routes require identity. Bodies are JSON. IDs come from the route, never the
 | GET | `/api/me` | |
 | GET | `/api/wishlists` | |
 | GET | `/api/deals` | items currently below their first-seen price, across all lists |
+| GET | `/api/runs/:id` | owner-scoped check status |
 | POST | `/api/wishlists` | `{url, frequency?: "daily"\|"hourly", addNewItems?}` |
 | GET | `/api/wishlists/:id` | |
 | PATCH | `/api/wishlists/:id` | `{monitored?, frequency?, addNewItems?, name?}` |

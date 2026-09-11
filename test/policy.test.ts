@@ -18,10 +18,11 @@ describe('alert transition policy', () => {
 });
 
 describe('systematic-shift guard', () => {
-  const pair = (b: number, p: number) => ({ baselineCents: b, priceCents: p });
+  const pair = (previous: number, price: number) => ({ previousCents: previous, priceCents: price });
   it('rejects a run where most items moved by one identical ratio', () => {
     const shifted = Array.from({ length: 20 }, (_, i) => pair(1000 + i * 137, Math.round((1000 + i * 137) * 0.73)));
     expect(looksSystematic(shifted)).toMatch(/of 20 priced items moved to 73%/);
+    expect(looksSystematic(shifted.map(({ priceCents }) => pair(priceCents, priceCents)))).toBeNull();
   });
   it('accepts genuine scattered changes and unchanged lists', () => {
     const scattered = Array.from({ length: 20 }, (_, i) => pair(1000, i < 5 ? 700 + i * 50 : 1000));

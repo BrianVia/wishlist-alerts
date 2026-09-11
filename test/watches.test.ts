@@ -99,4 +99,27 @@ describe('owner-scoped persistence and transitions', () => {
     expect((await env.DB.prepare('SELECT COUNT(*) count FROM observations WHERE run_id=?').bind(runId).first<{ count: number }>())?.count).toBe(100);
     expect((await env.DB.prepare('SELECT COUNT(*) count FROM items WHERE wishlist_id=?').bind(id).first<{ count: number }>())?.count).toBe(101);
   });
+
+  it('publishes observations only after their run is recorded', async () => {
+    const list = await imported(), id = list.wishlist.id, itemId = list.items[0].id, runId = `${id}:staged`;
+    await startRun(env, { wishlistId: id, runId, trigger: 'scheduled' });
+    await env.DB.prepare("INSERT INTO observations VALUES (?,?,?,?,?,'priced')").bind(itemId, runId, new Date(Date.now() + 1000).toISOString(), 5000, 'USD').run();
+    expect((await getWishlist(env, 'a', id))!.items[0]).toMatchObject({ current_cents: 10_000 });
+    expect(await itemHistory(env, 'a', itemId)).toHaveLength(1);
+    await recordCheck(env, { runId, snapshot: snapshot(item('one', 5000)) });
+    expect((await getWishlist(env, 'a', id))!.items[0]).toMatchObject({ current_cents: 5000 });
+    expect(await itemHistory(env, 'a', itemId)).toHaveLength(2);
+  });
+
+  it('leases one active run per wishlist for fifteen minutes', async () => {
+    const list = await imported(), id = list.wishlist.id;
+    expect(await startRun(env, { wishlistId: id, runId: 'active-1', trigger: 'manual' })).toBe(true);
+    expect(await startRun(env, { wishlistId: id, runId: 'active-2', trigger: 'manual' })).toBe(false);
+    expect(await requestManualCheck(env, 'a', id, Date.now())).toEqual({ error: 'busy' });
+    await recordCheck(env, { runId: 'active-1', snapshot: snapshot(item('one', 10_000)) });
+    expect(await startRun(env, { wishlistId: id, runId: 'active-3', trigger: 'manual' })).toBe(true);
+    await recordCheck(env, { runId: 'active-3', snapshot: snapshot(item('one', 10_000)) });
+    expect(await startRun(env, { wishlistId: id, runId: 'expired', trigger: 'manual', startedAt: new Date(Date.now() - 1_200_000).toISOString() })).toBe(true);
+    expect(await startRun(env, { wishlistId: id, runId: 'after-expired', trigger: 'manual' })).toBe(true);
+  });
 });

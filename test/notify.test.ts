@@ -25,8 +25,8 @@ describe('batched delivery', () => {
   });
   it('retries one provider failure, then stops failed', async () => {
     await seed('Safe', 'https://www.amazon.com/dp/B012345678'); const send = vi.fn(async (_message: unknown) => { throw new Error('provider down'); }); const testEnv = withEmail(send);
-    expect((await deliverPending(testEnv, 'r')).status).toBe('failed');
-    expect((await env.DB.prepare("SELECT status FROM deliveries WHERE id='r'").first<{ status: string }>())?.status).toBe('pending');
+    await expect(deliverPending(testEnv, 'r')).rejects.toThrow('provider down');
+    expect((await env.DB.prepare("SELECT status,attempts FROM deliveries WHERE id='r'").first())).toMatchObject({ status: 'pending', attempts: 1 });
     expect((await deliverPending(testEnv, 'r')).status).toBe('failed');
     expect((await env.DB.prepare("SELECT status,attempts FROM deliveries WHERE id='r'").first())).toMatchObject({ status: 'failed', attempts: 2 });
     expect((await deliverPending(testEnv, 'r')).status).toBe('skipped');

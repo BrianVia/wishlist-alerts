@@ -41,6 +41,7 @@ export async function deliverPending(env: Env, runId: string): Promise<DeliveryR
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Email delivery failed';
     await env.DB.prepare("UPDATE deliveries SET status=CASE WHEN attempts<2 THEN 'pending' ELSE 'failed' END,last_error=? WHERE run_id=?").bind(message, runId).run();
+    if ((delivery.attempts as number) < 2) throw error;
     return { status: 'failed' };
   }
 }
